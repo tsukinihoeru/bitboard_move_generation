@@ -34,12 +34,13 @@ std::string Square [64] {
 void print_move(uint16_t move){
     int source = (move >> 10) & 0x3f;
     int dest = (move >> 4) & 0x3f;
-    int flag = move & 0x0f;
-    std::cout<< Square[source] << " " << Square[dest] << " " << flag;
+    //int flag = move & 0x0f;
+    std::cout<< Square[source] << Square[dest];
 }
 
 
 Bitboard_Gen::Bitboard_Gen(std::string fen){
+    init_zobrist_keys();
     set_board(fen);
 }
 
@@ -50,13 +51,10 @@ void Bitboard_Gen::set_board(std::string fen){
     
     //wipe the board and fill it with 0s
     clear_board();
+    zobrist_hash = 0;
     ply = 0;
-    U64 moved_squares = 0;
+    uint8_t castling_rights = 0;
     
-    bool white_ks_castle = false;
-    bool white_qs_castle = false;
-    bool black_ks_castle = false;
-    bool black_qs_castle = false;
     for(char& c : fen){
         if(c == '/'){
             rank--;
@@ -70,17 +68,13 @@ void Bitboard_Gen::set_board(std::string fen){
             file++;
         }else if(rank == 0 && file == 8){
             if(c == 'K'){
-                white_ks_castle = true;
-                //std::cout << "white can kingside castle\n";
+                castling_rights |= WKS_CASTLING_RIGHTS;
             }else if(c == 'Q'){
-                white_qs_castle = true;
-                //std::cout << "white can queenside castle\n";
+                castling_rights |= WQS_CASTLING_RIGHTS;
             }else if(c == 'k'){
-                black_ks_castle = true;
-                //std::cout << "black can queenside castle\n";
+                castling_rights |= BKS_CASTLING_RIGHTS;
             }else if(c == 'q'){
-                black_qs_castle = true;
-                //std::cout << "black can kingside castle\n";
+                castling_rights |= BQS_CASTLING_RIGHTS;
             }else if(c == 'w'){
                 current_side = WHITE;
             }else if(c == 'b'){
@@ -88,16 +82,20 @@ void Bitboard_Gen::set_board(std::string fen){
             }
         }
     }
-    if(!white_ks_castle){
-        moved_squares |= occupy_square[7];
-    }if(!white_qs_castle){
-        moved_squares |= occupy_square[0];
-    }if(!black_ks_castle){
-        moved_squares |= occupy_square[63];
-    }if(!black_qs_castle){
-        moved_squares |= occupy_square[56];
-    }
-    game_history[ply] = game_state(moved_squares, 0, 0);
+
+    game_history[ply] = game_state(castling_rights, 0, 0);
+}
+
+void Bitboard_Gen::init_zobrist_keys(){
+    PRNG rng(1070372);
+    
+    for(int piece = 4; piece < 16; piece++){
+        for(int square = 0; square < 64; square++){
+            zobrist_keys.piecesquare[piece][square] = rng.rand64();
+        }
+    }for(int i = 0; i < 16; i++)
+        zobrist_keys.castling[i] = rng.rand64();
+    zobrist_keys.color = rng.rand64();
 }
 
 //generates all pseudolegal moves
@@ -109,30 +107,24 @@ int Bitboard_Gen::generate_moves(uint16_t * move_list){
     
     U64 side_pawn_board = bitboards[current_side] & bitboards[PAWN_BOARD];
     
-    //only initializing one destboard(although it makes me wanna cry)
-    //bear in mind the code gets ugly because of this
+    //only initializing one destboard
     U64 board;
     
     //castles is also added here FYI
     //branching bad yada yada, but im lazy, if(BLACK), else->WHITE
     if(current_side){
         //get all possible pawn pushes except for ones that are promotions
-        //NEED TO DEAL WITH PROMOTIONS LATER
         board = (side_pawn_board >> 8) & empty & (~rank_masks[0]);
         U64 double_pawn_pushes = (board >> 8) & empty & rank_masks[4];
         while(board){
             int dest = pop_lsb(&board);
-            
-            //is adding 8 too slow?? --> potential area to speed code up
-            //*move_list++ = Move(dest + 8, dest, QUIET_FLAG);
             *move_list++ = ((dest + 8) << 10) | (dest << 4) | QUIET_FLAG;
-        }while(double_pawn_pushes){
+        }
+        while(double_pawn_pushes){
             int dest = pop_lsb(&double_pawn_pushes);
-            //is adding 16 too slow?? --> potential area to speed code up
-            //*move_list++ = Move(dest + 16, dest, DOUBLE_PAWN_PUSH_FLAG);
             *move_list++ = ((dest + 16) << 10) | (dest << 4) | DOUBLE_PAWN_PUSH_FLAG;
         }
-        
+        //get all pawn captures except promos
         board = (side_pawn_board >> 9) & bitboards[WHITE] & (~file_masks[7]) & (~rank_masks[0]);
         while(board){
             int dest = pop_lsb(&board);
@@ -161,8 +153,7 @@ int Bitboard_Gen::generate_moves(uint16_t * move_list){
             move_list = add_promo_cap_moves(dest + 7, dest, move_list);
         }
         
-        //IDEA FOR EN PASSANT
-        //Take  occupy[En_Passant], or it with bitshift left of side pawn board, then poplsb -> isnt that dumb as fuck?
+        //EN PASSANT
         U64 possible_passants = ep_target_lookup[game_history[ply].ep_target] & side_pawn_board;
         while(possible_passants){
             int source = pop_lsb(&possible_passants);
@@ -172,17 +163,15 @@ int Bitboard_Gen::generate_moves(uint16_t * move_list){
         //black ks castle logic, first line: if h8 and e8 has been undisturbed
         //2nd line: if not in check and not castling through check
         //3d line: squares between are empty
-        if(!(game_history[ply].moved_squares & (occupy_square[63] | occupy_square[60]))
+        if((game_history[ply].castling_rights & BKS_CASTLING_RIGHTS)
            && !(enemy_attacked_squares & (occupy_square[60] | occupy_square[61] | occupy_square[62]))
            && !(occupied & (occupy_square[61] | occupy_square[62]))){
-            //*move_list++ = Move(60, 62, KINGSIDE_CASTLE_FLAG);
             *move_list++ = (60 << 10) | (62 << 4) |KINGSIDE_CASTLE_FLAG;
         }
         //black qs castle
-        if(!(game_history[ply].moved_squares & (occupy_square[56] | occupy_square[60]))
+        if((game_history[ply].castling_rights & BQS_CASTLING_RIGHTS)
            && !(enemy_attacked_squares & (occupy_square[60] | occupy_square[59] | occupy_square[58]))
            && !(occupied & (occupy_square[57] | occupy_square[58] | occupy_square[59]))){
-            //*move_list++ = Move(60, 58, QUEENSIDE_CASTLE_FLAG);
             *move_list++ = (60 << 10) | (58 << 4) |QUEENSIDE_CASTLE_FLAG;
         }
     }
@@ -191,13 +180,9 @@ int Bitboard_Gen::generate_moves(uint16_t * move_list){
         U64 double_pawn_pushes = (board << 8) & empty & rank_masks[3];
         while(board){
             int dest = pop_lsb(&board);
-            //is adding 8 too slow?? --> potential area to speed code up
-            //*move_list++ = Move(dest - 8, dest, QUIET_FLAG);
             *move_list++ = ((dest - 8) << 10) | (dest << 4) | QUIET_FLAG;
         }while(double_pawn_pushes){
             int dest = pop_lsb(&double_pawn_pushes);
-            //is adding 16 too slow?? --> potential area to speed code up
-            //*move_list++ = Move(dest - 16, dest, DOUBLE_PAWN_PUSH_FLAG);
             *move_list++ = ((dest - 16) << 10) | (dest << 4) | DOUBLE_PAWN_PUSH_FLAG;
         }
         
@@ -237,17 +222,15 @@ int Bitboard_Gen::generate_moves(uint16_t * move_list){
         }
 
         //white castle logic, if confused, read the black castle comments above
-        if(!(game_history[ply].moved_squares & (occupy_square[4] | occupy_square[7]))
+        if((game_history[ply].castling_rights & WKS_CASTLING_RIGHTS)
            && !(enemy_attacked_squares & (occupy_square[4] | occupy_square[5] | occupy_square[6]))
            && !(occupied & (occupy_square[5] | occupy_square[6]))){
-            //*move_list++ = Move(4, 6, KINGSIDE_CASTLE_FLAG);
             *move_list++ = (4 << 10) | (6 << 4) | KINGSIDE_CASTLE_FLAG;
         }
         //white qs castle
-        if(!(game_history[ply].moved_squares & (occupy_square[4] | occupy_square[0]))
+        if((game_history[ply].castling_rights & WQS_CASTLING_RIGHTS)
            && !(enemy_attacked_squares & (occupy_square[2] | occupy_square[3] | occupy_square[4]))
            && !(occupied & (occupy_square[1] | occupy_square[2] | occupy_square[3]))){
-            //*move_list++ = Move(4, 2, QUEENSIDE_CASTLE_FLAG);
             *move_list++ = (4 << 10) | (2 << 4) |QUEENSIDE_CASTLE_FLAG;
         }
     }
@@ -302,16 +285,7 @@ bool Bitboard_Gen::is_in_check(){
     U64 board = pawn_capture_lookup[!current_side][king_source];
     if(board & bitboards[current_side] & bitboards[PAWN_BOARD])
         return true;
-    /*
-    if(current_side){ //current_side == 1, but we're checking for white ---> super confusing
-        U64 pawn_capture = white_pawn_capture_lookup[king_source];
-        if(pawn_capture & bitboards[BLACK] & bitboards[PAWN_BOARD])
-            return true;
-    }else{
-        U64 pawn_capture = black_pawn_capture_lookup[king_source];
-        if(pawn_capture & bitboards[WHITE] & bitboards[PAWN_BOARD])
-            return true;
-    }*/
+    
     //knights and kings are easy
     if(knight_move_lookup[king_source] & bitboards[current_side] & bitboards[KNIGHT_BOARD])
         return true;
@@ -331,8 +305,6 @@ bool Bitboard_Gen::is_in_check(){
     if(board & bitboards[current_side] & (bitboards[ROOK_BOARD] | bitboards[QUEEN_BOARD])){
         return true;
     }
-    
-    
     return false;
 }
 
@@ -361,10 +333,9 @@ U64 Bitboard_Gen::generate_attacked_squares(bool side){
     }
     
     //get the king moves, errors if no king
-    //if(side_king_board){
     int king_source = get_square_index(bitboards[side] & bitboards[KING_BOARD]);
     attacked_squares |= king_move_lookup[king_source];
-   // }
+
     //get all diag sliders
     U64 side_diagonal_board = bitboards[side] & (bitboards[BISHOP_BOARD] | bitboards[QUEEN_BOARD]);
     while(side_diagonal_board){
@@ -384,7 +355,8 @@ U64 Bitboard_Gen::generate_attacked_squares(bool side){
 }
 
 void Bitboard_Gen::make_move(uint16_t move){
-    U64 new_moved_squares = game_history[ply].moved_squares;
+    uint8_t new_castling_rights = game_history[ply].castling_rights;
+    zobrist_hash ^= zobrist_keys.castling[new_castling_rights];
     int ep_target = 0;
     int captured_piece = 0;
     
@@ -392,59 +364,69 @@ void Bitboard_Gen::make_move(uint16_t move){
     int dest = (move >> 4) & 0x3f;
     int flag = move & 0x0f;
     
-    new_moved_squares |= occupy_square[source] | occupy_square[dest];
-    
+    //IMPLEMENT THE FUCKIGN CASTLING LOGIC HEEEEREEE RAAAAAHHHHHHHHHHH
+    switch (source){
+        case 0: //a1
+            new_castling_rights &= ~WQS_CASTLING_RIGHTS;
+            break;
+        case 4: //e1
+            new_castling_rights &= ~(WQS_CASTLING_RIGHTS | WKS_CASTLING_RIGHTS);
+            break;
+        case 7: //h1
+            new_castling_rights &= ~WKS_CASTLING_RIGHTS;
+            break;
+        case 56: //a8
+            new_castling_rights &= ~BQS_CASTLING_RIGHTS;
+            break;
+        case 60: //e8
+            new_castling_rights &= ~(BQS_CASTLING_RIGHTS | BKS_CASTLING_RIGHTS);
+            break;
+        case 63: //h8
+            new_castling_rights &= ~BKS_CASTLING_RIGHTS;
+            break;
+    }
+    switch (dest){
+        case 0: //a1
+            new_castling_rights &= ~WQS_CASTLING_RIGHTS;
+            break;
+        case 4: //e1
+            new_castling_rights &= ~(WQS_CASTLING_RIGHTS | WKS_CASTLING_RIGHTS);
+            break;
+        case 7: //h1
+            new_castling_rights &= ~WKS_CASTLING_RIGHTS;
+            break;
+        case 56: //a8
+            new_castling_rights &= ~BQS_CASTLING_RIGHTS;
+            break;
+        case 60: //e8
+            new_castling_rights &= ~(BQS_CASTLING_RIGHTS | BKS_CASTLING_RIGHTS);
+            break;
+        case 63: //h8
+            new_castling_rights &= ~BKS_CASTLING_RIGHTS;
+            break;
+    }
 
     if(flag == QUIET_FLAG){
         move_piece(source, dest);
-        /*
-        add_piece(mailbox[source], dest);
-        remove_piece(source);
-         */
     }
     else if(flag == DOUBLE_PAWN_PUSH_FLAG){
         move_piece(source, dest);
-        /*
-        add_piece(mailbox[source], dest);
-        remove_piece(source);
-         */
         ep_target = dest;
     }
     else if(flag == CAPTURE_FLAG){
         captured_piece = mailbox[dest];
         remove_piece(dest);
         move_piece(source, dest);
-        /*
-        add_piece(mailbox[source], dest);
-        remove_piece(source);
-         */
     }
-    
     else if(flag == KINGSIDE_CASTLE_FLAG){
         move_piece(source, dest);
         move_piece(source + 3, source + 1);
-        
-        /*
-        add_piece(mailbox[source], dest);
-        remove_piece(source);
-        add_piece(mailbox[source + 3], source + 1);
-        remove_piece(source + 3);
-        */
     }
     else if(flag == QUEENSIDE_CASTLE_FLAG){
         move_piece(source, dest);
         move_piece(source - 4, source - 1);
-        
-        /*
-        add_piece(mailbox[source], dest);
-        remove_piece(source);
-        add_piece(mailbox[source - 4], source - 1);
-        remove_piece(source - 4);
-        */
     }
-    
     else if(flag == EN_PASSANT_FLAG){
-        //std::cout << game_history[ply].ep_target << " source: " << source << " dest: " << dest << "\n";
         captured_piece = mailbox[game_history[ply].ep_target];
         move_piece(source, dest);
         remove_piece(game_history[ply].ep_target);
@@ -489,13 +471,15 @@ void Bitboard_Gen::make_move(uint16_t move){
         remove_piece(dest);
         add_piece(current_side, QUEEN_BOARD, dest);
     }
-    
     ply++;
-    game_history[ply] = game_state(new_moved_squares, captured_piece, ep_target);
+    game_history[ply] = game_state(new_castling_rights, captured_piece, ep_target);
     current_side = !current_side;
+    zobrist_hash ^= zobrist_keys.color;
+    zobrist_hash ^= zobrist_keys.castling[new_castling_rights];
 }
 
 void Bitboard_Gen::unmake_move(uint16_t move){
+    zobrist_hash ^= zobrist_keys.castling[game_history[ply].castling_rights];
     int source = (move >> 10) & 0x3f;
     int dest = (move >> 4) & 0x3f;
     int flag = move & 0x0f;
@@ -536,7 +520,9 @@ void Bitboard_Gen::unmake_move(uint16_t move){
         add_piece(!current_side, PAWN_BOARD, source);
     }
     current_side = !current_side;
+    zobrist_hash ^= zobrist_keys.color;
     ply--;
+    zobrist_hash ^= zobrist_keys.castling[game_history[ply].castling_rights];
 }
 
 U64 Bitboard_Gen::perft(int depth){
@@ -546,15 +532,12 @@ U64 Bitboard_Gen::perft(int depth){
     uint16_t move_list[256];
     int num_moves;
     U64 nodes = 0;
-    //U64 current_moves = 0;
     num_moves = generate_moves(move_list);
     for(int i = 0; i < num_moves; i++){
-        
         make_move(move_list[i]);
         if(!is_in_check()){
             nodes += perft(depth - 1);
         }
-        //print_bit_boards();
         unmake_move(move_list[i]);
     }
     return nodes;
@@ -603,6 +586,7 @@ inline uint16_t * Bitboard_Gen::add_promo_cap_moves(int source, int dest, uint16
 }
 
 void Bitboard_Gen::move_piece(int source, int dest){
+    zobrist_hash ^= zobrist_keys.piecesquare[mailbox[source]][source] ^ zobrist_keys.piecesquare[mailbox[source]][dest];
     U64 mask = occupy_square[source] | occupy_square[dest];
     bitboards[mailbox[source] & 1] ^= mask;
     bitboards[mailbox[source] >> 1] ^= mask;
@@ -614,18 +598,22 @@ void Bitboard_Gen::add_piece(int piece_color, int piece_type, int square_index){
     bitboards[piece_type] |= occupy_square[square_index];
     bitboards[piece_color] |= occupy_square[square_index];
     mailbox[square_index] = piece_color + (piece_type << 1);
+    zobrist_hash ^= zobrist_keys.piecesquare[mailbox[square_index]][square_index];
 }
 
 void Bitboard_Gen::add_piece(int piece, int square_index){
     bitboards[piece & 1] |= occupy_square[square_index];
     bitboards[piece >> 1] |= occupy_square[square_index];
     mailbox[square_index] = piece;
+    zobrist_hash ^= zobrist_keys.piecesquare[piece][square_index];
 }
 
 void Bitboard_Gen::remove_piece(int source){
+    zobrist_hash ^= zobrist_keys.piecesquare[mailbox[source]][source];
     bitboards[mailbox[source] & 1] &= ~occupy_square[source];
     bitboards[mailbox[source] >> 1] &= ~occupy_square[source];
     mailbox[source] = 0;
+    
 }
 
 void Bitboard_Gen::clear_board(){
@@ -652,7 +640,7 @@ bool Bitboard_Gen::check_consistency(){
     return true;
 }
 
-char print_piece_arr[20] = {'0', '1', '2', '3', 'P', 'p', 'B', 'b', 'N', 'n', 'R', 'r', 'Q', 'q', 'K', 'k'};
+char print_piece_arr[16] = {'0', '1', '2', '3', 'P', 'p', 'B', 'b', 'N', 'n', 'R', 'r', 'Q', 'q', 'K', 'k'};
 
 void Bitboard_Gen::print_board(){
     for(int i = 7; i >= 0; i--){
@@ -703,5 +691,3 @@ constexpr int Bitboard_Gen::get_square_index(U64 bitboard){
 Bitboard_Gen::Bitboard_Gen(){
     clear_board();
 }
-
-
