@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <libkern/OSByteOrder.h>
+#include "utility.h"
 
 #ifndef BITBOARD_GEN
 #define BITBOARD_GEN
@@ -35,22 +36,34 @@
 #define ROOK_PROMO_CAP_FLAG 14
 #define QUEEN_PROMO_CAP_FLAG 15
 
+#define WKS_CASTLING_RIGHTS 8
+#define WQS_CASTLING_RIGHTS 4
+#define BKS_CASTLING_RIGHTS 2
+#define BQS_CASTLING_RIGHTS 1
+
 #define U64 uint64_t
 
 struct game_state{
-    U64 moved_squares;
+    uint8_t castling_rights;
     int captured; //first bit is the side, rest is piece type
     int ep_target; //no fucking clue
-    game_state(U64 moved, int cap, int ep){
-        moved_squares = moved;
+    game_state(uint16_t castling, int cap, int ep){
+        castling_rights = castling;
         captured = cap;
         ep_target = ep;
     }
     game_state(){
-        moved_squares = 0;
+        castling_rights = 0;
         captured = 0;
         ep_target = 0;
     }
+};
+
+struct zobrist_struct {
+    U64 piecesquare[16][64];
+    U64 color;
+    U64 castling[16];
+    U64 ep_squares[40];
 };
 
 class Bitboard_Gen{
@@ -58,12 +71,15 @@ class Bitboard_Gen{
 public:
     int mailbox[64]; //first bit represents color, rest represent piece type
     U64 bitboards[8];
+    U64 zobrist_hash = 0; //current zobrist hash of position
     game_state game_history[200];
     int current_side = WHITE;
     int ply = 0;
+    zobrist_struct zobrist_keys;
     
     Bitboard_Gen();
     Bitboard_Gen(std::string fen);
+    void init_zobrist_keys();
     void set_board(std::string fen);
     void clear_board();
     void move_piece(int source, int dest);
@@ -96,6 +112,7 @@ public:
     //returns square index of lsb
     constexpr int get_square_index(U64 bitboard);
 private:
+    
     std::unordered_map<char, int> fen_char_to_piece_type = {{'p', PAWN_BOARD}, {'b', BISHOP_BOARD}, {'n', KNIGHT_BOARD},
         {'r', ROOK_BOARD}, {'q', QUEEN_BOARD}, {'k', KING_BOARD}};
     
@@ -255,42 +272,7 @@ private:
             0x28000000000000, 0x50000000000000, 0xa0000000000000, 0x40000000000000
         }
     };
-    const U64 white_pawn_capture_lookup[64] = {
-        0x200, 0x500, 0xa00, 0x1400,
-        0x2800, 0x5000, 0xa000, 0x4000,
-        0x20000, 0x50000, 0xa0000, 0x140000,
-        0x280000, 0x500000, 0xa00000, 0x400000,
-        0x2000000, 0x5000000, 0xa000000, 0x14000000,
-        0x28000000, 0x50000000, 0xa0000000, 0x40000000,
-        0x200000000, 0x500000000, 0xa00000000, 0x1400000000,
-        0x2800000000, 0x5000000000, 0xa000000000, 0x4000000000,
-        0x20000000000, 0x50000000000, 0xa0000000000, 0x140000000000,
-        0x280000000000, 0x500000000000, 0xa00000000000, 0x400000000000,
-        0x2000000000000, 0x5000000000000, 0xa000000000000, 0x14000000000000,
-        0x28000000000000, 0x50000000000000, 0xa0000000000000, 0x40000000000000,
-        0x200000000000000, 0x500000000000000, 0xa00000000000000, 0x1400000000000000,
-        0x2800000000000000, 0x5000000000000000, 0xa000000000000000, 0x4000000000000000,
-        0x0, 0x0, 0x0, 0x0,
-        0x0, 0x0, 0x0, 0x0,
-    };
-    const U64 black_pawn_capture_lookup[64] = {
-        0x0, 0x0, 0x0, 0x0,
-        0x0, 0x0, 0x0, 0x0,
-        0x2, 0x5, 0xa, 0x14,
-        0x28, 0x50, 0xa0, 0x40,
-        0x200, 0x500, 0xa00, 0x1400,
-        0x2800, 0x5000, 0xa000, 0x4000,
-        0x20000, 0x50000, 0xa0000, 0x140000,
-        0x280000, 0x500000, 0xa00000, 0x400000,
-        0x2000000, 0x5000000, 0xa000000, 0x14000000,
-        0x28000000, 0x50000000, 0xa0000000, 0x40000000,
-        0x200000000, 0x500000000, 0xa00000000, 0x1400000000,
-        0x2800000000, 0x5000000000, 0xa000000000, 0x4000000000,
-        0x20000000000, 0x50000000000, 0xa0000000000, 0x140000000000,
-        0x280000000000, 0x500000000000, 0xa00000000000, 0x400000000000,
-        0x2000000000000, 0x5000000000000, 0xa000000000000, 0x14000000000000,
-        0x28000000000000, 0x50000000000000, 0xa0000000000000, 0x40000000000000
-    };
+    
     const U64 ep_target_lookup[64] = {
         0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0,
