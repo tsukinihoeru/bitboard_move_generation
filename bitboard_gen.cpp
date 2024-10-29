@@ -96,6 +96,8 @@ void Bitboard_Gen::init_zobrist_keys(){
     }for(int i = 0; i < 16; i++)
         zobrist_keys.castling[i] = rng.rand64();
     zobrist_keys.color = rng.rand64();
+    for(int i = 0; i < 40; i++)
+        zobrist_keys.ep_squares[i] = rng.rand64();
 }
 
 //generates all pseudolegal moves
@@ -357,6 +359,7 @@ U64 Bitboard_Gen::generate_attacked_squares(bool side){
 void Bitboard_Gen::make_move(uint16_t move){
     uint8_t new_castling_rights = game_history[ply].castling_rights;
     zobrist_hash ^= zobrist_keys.castling[new_castling_rights];
+    zobrist_hash ^= zobrist_keys.ep_squares[game_history[ply].ep_target];
     int ep_target = 0;
     int captured_piece = 0;
     
@@ -476,9 +479,11 @@ void Bitboard_Gen::make_move(uint16_t move){
     current_side = !current_side;
     zobrist_hash ^= zobrist_keys.color;
     zobrist_hash ^= zobrist_keys.castling[new_castling_rights];
+    zobrist_hash ^= zobrist_keys.ep_squares[game_history[ply].ep_target];
 }
 
 void Bitboard_Gen::unmake_move(uint16_t move){
+    zobrist_hash ^= zobrist_keys.ep_squares[game_history[ply].ep_target];
     zobrist_hash ^= zobrist_keys.castling[game_history[ply].castling_rights];
     int source = (move >> 10) & 0x3f;
     int dest = (move >> 4) & 0x3f;
@@ -523,15 +528,16 @@ void Bitboard_Gen::unmake_move(uint16_t move){
     zobrist_hash ^= zobrist_keys.color;
     ply--;
     zobrist_hash ^= zobrist_keys.castling[game_history[ply].castling_rights];
+    zobrist_hash ^= zobrist_keys.ep_squares[game_history[ply].ep_target];
 }
 
 U64 Bitboard_Gen::perft(int depth){
     if (depth == 0){
         return 1ULL;
     }
+    U64 nodes = 0;
     uint16_t move_list[256];
     int num_moves;
-    U64 nodes = 0;
     num_moves = generate_moves(move_list);
     for(int i = 0; i < num_moves; i++){
         make_move(move_list[i]);
