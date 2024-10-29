@@ -8,6 +8,7 @@
 #include <string>
 #include <libkern/OSByteOrder.h>
 #include "utility.h"
+#include "transposition.h"
 
 #ifndef BITBOARD_GEN
 #define BITBOARD_GEN
