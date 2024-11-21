@@ -6,12 +6,29 @@
 //
 #include <iostream>
 #include <string>
-#include <libkern/OSByteOrder.h>
+#include <cstdint>
 #include "utility.h"
 #include "transposition.h"
+#include <unordered_map>
 
 #ifndef BITBOARD_GEN
 #define BITBOARD_GEN
+
+#if defined(__APPLE__)
+    #include <libkern/OSByteOrder.h>
+    #define bswap_32(x) OSSwapInt32(x)
+    #define bswap_64(x) OSSwapInt64(x)
+#elif defined(__linux__)
+    #include <endian.h>
+    #define bswap_32(x) __bswap_32(x)
+    #define bswap_64(x) __bswap_64(x)
+#elif defined(_WIN32)
+    #include <stdlib.h>
+    #define bswap_32(x) _byteswap_ulong(x)
+    #define bswap_64(x) _byteswap_uint64(x)
+#else
+    #error "Byte swapping functions are not defined for this platform."
+#endif
 
 #define WHITE 0
 #define BLACK 1
@@ -28,12 +45,12 @@
 #define QUEENSIDE_CASTLE_FLAG 3
 #define CAPTURE_FLAG 4
 #define EN_PASSANT_FLAG 5
-#define KNIGHT_PROMO_FLAG 8
-#define BISHOP_PROMO_FLAG 9
+#define BISHOP_PROMO_FLAG 8
+#define KNIGHT_PROMO_FLAG 9
 #define ROOK_PROMO_FLAG 10
 #define QUEEN_PROMO_FLAG 11
-#define KNIGHT_PROMO_CAP_FLAG 12
-#define BISHOP_PROMO_CAP_FLAG 13
+#define BISHOP_PROMO_CAP_FLAG 12
+#define KNIGHT_PROMO_CAP_FLAG 13
 #define ROOK_PROMO_CAP_FLAG 14
 #define QUEEN_PROMO_CAP_FLAG 15
 
@@ -47,7 +64,7 @@
 struct game_state{
     uint8_t castling_rights;
     int captured; //first bit is the side, rest is piece type
-    int ep_target; //no fucking clue
+    int ep_target;
     game_state(uint16_t castling, int cap, int ep){
         castling_rights = castling;
         captured = cap;
@@ -72,52 +89,89 @@ class Bitboard_Gen{
 public:
     int mailbox[64]; //first bit represents color, rest represent piece type
     U64 bitboards[8];
+    U64 empty_board;
+    U64 occupied_board;
+    U64 enemy_attacked_board;
+    
     U64 zobrist_hash = 0; //current zobrist hash of position
-    game_state game_history[200];
+    game_state game_history[400];
+    U64 hash_history[400];
     int current_side = WHITE;
     int ply = 0;
     zobrist_struct zobrist_keys;
     
+    //initialization
     Bitboard_Gen();
     Bitboard_Gen(std::string fen);
     void init_zobrist_keys();
     void set_board(std::string fen);
+    void parse_pgn(std::string pgn);
     void clear_board();
+    
+    //pseudolegal move generation
+    uint16_t* move_list;
+    int generate_moves(uint16_t * move_list);
+    int generate_captures(uint16_t * move_list);
+    void generate_attacked_squares();
+    U64 hyp_quint(int source, U64 mask);
+    U64 hyp_quint_horiz(int source, U64 mask);
+    inline void add_black_pawn_moves();
+    inline void add_white_pawn_moves();
+    inline void add_black_castle_moves();
+    inline void add_white_castle_moves();
+    inline void add_knight_moves();
+    inline void add_king_moves();
+    inline void add_diag_moves();
+    inline void add_orthog_moves();
+    inline void add_quiet_moves(int source, U64 dests);
+    inline void add_capture_moves(int source, U64 dests);
+    inline void add_promo_moves(int source, int dest);
+    inline void add_promo_cap_moves(int source, int dest);
+    
+    //modifying the board
+    void make_move(uint16_t move);
+    void unmake_move(uint16_t move);
+    inline void pre_update_hash();
+    inline void post_update_hash();
+    uint8_t handle_castling_rights(int source, int dest);
+    void make_null_move();
+    void unmake_null_move();
+    
     void move_piece(int source, int dest);
     void add_piece(int piece_color, int piece_type, int square_index);
     void add_piece(int piece, int square_index);
     void remove_piece(int source);
     
-    bool is_in_check();
+    //to test move legality, the king can be captured
+    bool is_move_legal();
+    //The usual one, side to move needs to escape check
+    bool position_in_check();
     
-    int generate_moves(uint16_t * move_list);
-    int generate_moves(uint16_t * move_list, bool side);
-    U64 generate_attacked_squares(bool side);
-    U64 hyp_quint(int source, U64 occupied, U64 mask);
-    U64 hyp_quint_horiz(int source, U64 occupied, U64 mask);
-    inline uint16_t * add_quiet_moves(int source, U64 dests, uint16_t * move_list);
-    inline uint16_t * add_capture_moves(int source, U64 dests, uint16_t * move_list);
-    inline uint16_t * add_promo_moves(int source, int dest, uint16_t * move_list);
-    inline uint16_t * add_promo_cap_moves(int source, int dest, uint16_t * move_list);
-    
-    void make_move(uint16_t move);
-    void unmake_move(uint16_t move);
-    U64 perft(int depth);
-    
+    //debugging
     bool check_consistency();
     void print_board();
     void print_bit_boards();
     void print_u64(U64 bitboard);
+    U64 perft(int depth);
+    
+    //bitwise functions
     //returns square index of lsb and removes lsb from bitboard
-    inline int pop_lsb(U64 * bitboard);
+    inline int pop_lsb(U64 * bitboard){
+        int lsb_index = get_square_index(*bitboard);
+        (*bitboard) = (*bitboard) & (*bitboard - 1);
+        return lsb_index;
+    };
     //returns square index of lsb
-    constexpr int get_square_index(U64 bitboard);
-private:
+    constexpr int get_square_index(U64 bitboard){
+        return index_debruges64[(((bitboard) ^ ((bitboard) - 1)) * debruges) >> 58];
+    };
+    U64 mirror(U64 x);
+
     
     std::unordered_map<char, int> fen_char_to_piece_type = {{'p', PAWN_BOARD}, {'b', BISHOP_BOARD}, {'n', KNIGHT_BOARD},
         {'r', ROOK_BOARD}, {'q', QUEEN_BOARD}, {'k', KING_BOARD}};
     
-    const int source_to_rank[64]{
+    constexpr static int source_to_rank[64]{
         0, 0, 0, 0, 0, 0, 0, 0,
         1, 1, 1, 1, 1, 1, 1, 1,
         2, 2, 2, 2, 2, 2, 2, 2,
@@ -127,7 +181,7 @@ private:
         6, 6, 6, 6, 6, 6, 6, 6,
         7, 7, 7, 7, 7, 7, 7, 7,
     };
-    const int source_to_file[64]{
+    constexpr static int source_to_file[64]{
         0, 1, 2, 3, 4, 5, 6, 7,
         0, 1, 2, 3, 4, 5, 6, 7,
         0, 1, 2, 3, 4, 5, 6, 7,
@@ -137,7 +191,7 @@ private:
         0, 1, 2, 3, 4, 5, 6, 7,
         0, 1, 2, 3, 4, 5, 6, 7
     };
-    const int source_to_diagonal[64]{
+    constexpr static int source_to_diagonal[64]{
         7, 6, 5, 4, 3, 2, 1, 0,
         8, 7, 6, 5, 4, 3, 2, 1,
         9, 8, 7, 6, 5, 4, 3, 2,
@@ -147,7 +201,7 @@ private:
         13, 12, 11, 10, 9, 8, 7, 6,
         14, 13, 12, 11, 10, 9, 8, 7
     };
-    const int source_to_antidiagonal[64]{
+    constexpr static int source_to_antidiagonal[64]{
         0, 1, 2, 3, 4, 5, 6, 7,
         1, 2, 3, 4, 5, 6, 7, 8,
         2, 3, 4, 5, 6, 7, 8, 9,
@@ -159,7 +213,7 @@ private:
     };
     
     //0 for 1st rank, 7 for 8th
-    const U64 rank_masks[8]{
+    constexpr static U64 rank_masks[8]{
         0x00000000000000ff,
         0x000000000000ff00,
         0x0000000000ff0000,
@@ -170,7 +224,7 @@ private:
         0xff00000000000000,
     };
     //0 for a file, 7 for h
-    const U64 file_masks[8]{
+    constexpr static U64 file_masks[8]{
         0x0101010101010101,
         0x0202020202020202,
         0x0404040404040404,
@@ -181,7 +235,7 @@ private:
         0x8080808080808080
     };
     
-    const U64 diagonal_masks[15] = {
+    constexpr static U64 diagonal_masks[15] = {
         0x80, 0x8040, 0x804020,
         0x80402010, 0x8040201008, 0x804020100804,
         0x80402010080402, 0x8040201008040201, 0x4020100804020100,
@@ -189,7 +243,7 @@ private:
         0x402010000000000, 0x201000000000000, 0x100000000000000
     };
 
-    const U64 antidiagonal_masks[15] = {
+    constexpr static U64 antidiagonal_masks[15] = {
         0x1, 0x102, 0x10204,
         0x1020408, 0x102040810, 0x10204081020,
         0x1020408102040, 0x102040810204080, 0x204081020408000,
@@ -198,7 +252,7 @@ private:
     };
     
     //big fat lookup table for king attacks
-    const U64 king_move_lookup[64]{
+    constexpr static U64 king_move_lookup[64]{
         0x302, 0x705, 0xe0a, 0x1c14,
         0x3828, 0x7050, 0xe0a0, 0xc040,
         0x30203, 0x70507, 0xe0a0e, 0x1c141c,
@@ -217,7 +271,7 @@ private:
         0x2838000000000000, 0x5070000000000000, 0xa0e0000000000000, 0x40C0000000000000
     };
     //big fat lookup table for knight attacks
-    const U64 knight_move_lookup[64] = {
+    constexpr static U64 knight_move_lookup[64] = {
         0x20400, 0x50800, 0xa1100, 0x142200,
         0x284400, 0x508800, 0xa01000, 0x402000,
         0x2040004, 0x5080008, 0xa110011, 0x14220022,
@@ -236,7 +290,7 @@ private:
         0x44280000000000, 0x0088500000000000, 0x0010a00000000000, 0x20400000000000
     };
     
-    const U64 pawn_capture_lookup[2][64]{ //0 for white, black for 1
+    constexpr static U64 pawn_capture_lookup[2][64]{ //0 for white, black for 1
         {
             0x200, 0x500, 0xa00, 0x1400,
             0x2800, 0x5000, 0xa000, 0x4000,
@@ -274,7 +328,7 @@ private:
         }
     };
     
-    const U64 ep_target_lookup[64] = {
+    constexpr static U64 ep_target_lookup[64] = {
         0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0,
@@ -295,7 +349,7 @@ private:
         0x0, 0x0, 0x0, 0x0,
     };
     
-    const U64 occupy_square[64] = {
+    constexpr static U64 occupy_square[64] = {
         0x1, 0x2, 0x4, 0x8,
         0x10, 0x20, 0x40, 0x80,
         0x100, 0x200, 0x400, 0x800,
@@ -313,7 +367,7 @@ private:
         0x100000000000000, 0x200000000000000, 0x400000000000000, 0x800000000000000,
         0x1000000000000000, 0x2000000000000000, 0x4000000000000000, 0x8000000000000000
     };
-    const int index_debruges64[64] = {
+    constexpr static int index_debruges64[64] = {
         0, 47,  1, 56, 48, 27,  2, 60,
        57, 49, 41, 37, 28, 16,  3, 61,
        54, 58, 35, 52, 50, 42, 21, 44,
@@ -323,6 +377,6 @@ private:
        25, 39, 14, 33, 19, 30,  9, 24,
        13, 18,  8, 12,  7,  6,  5, 63
     };
-    const U64 debruges = 0x03f79d71b4cb0a89;
+    constexpr static U64 debruges = 0x03f79d71b4cb0a89;
 };
 #endif
